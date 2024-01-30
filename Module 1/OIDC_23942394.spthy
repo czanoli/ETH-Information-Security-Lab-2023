@@ -1,0 +1,326 @@
+theory OIDC
+/* Model of a simplified version of the OpenID-connect Implicit Flow protocol.
+   OpenID connect specification: https://openid.net/specs/openid-connect-core-1_0.html*/
+
+begin
+
+//Do not change the following line, i.e. do not add, change or remove anything (not even comments) in the following line.
+builtins: signing
+
+/*
+Agents that take part in the protocol:
+- User: end-user (including the browser)
+- RP: Relaying Party: the serivce (e.g. webpage) the user wants to access to
+- IdP: Identity Provider: the authorization server that is capable of authenticating end-users 
+*/
+
+
+/*Public key infrastructure*/
+//Only the IdP has a private/public key. 
+
+/* The following rule should be annotated by the following action fact:
+- IdP_initializes($IdP, ~skey) : indicating $IdP generated key ~skey
+*/
+rule IdPgeneratesKeyPair:
+[ Fr(~skey) ]
+--[ IdP_initializes($IdP, ~skey) ]->
+[ !Pk($IdP, pk(~skey)), !Ltk($IdP, ~skey), Out(pk(~skey)) ]
+
+/* The following rule should be annotated by the following action fact:
+- Compromised($A) : indicating agent $A got compromised 
+                            and their secret key was published.
+*/
+rule CompromiseAgent:
+[ !Ltk($A, ~skA) ]
+--[ Compromised($A) ]->
+[ Out(~skA) ]  
+
+
+// Secure Channel rules.
+// We assume that the User and the IdP communicate using TLS. We model communication with TLS with a secure channel
+// Communication between the User and the RP is however not assumed to go through TLS. 
+
+// Out_S($A,$B,x) indicates that agent $A is sending to agent $B$ a message x. 
+// In_S($A,$B,x) indicates that agent $B is receiving from agent $A$ the message x. 
+//Do not change the following two rules, i.e. do not add, change or remove anything (not even comments) in the following nine lines.
+rule ChanOut_S:
+    [ Out_S($A,$B,x) ]
+  --[ ChanOut_S($A,$B,x) ]->
+    [ Sec($A,$B,x) ]
+
+rule ChanIn_S:
+    [ Sec($A,$B,x) ]
+  --[ ChanIn_S($A,$B,x) ]->
+    [ In_S($A,$B,x) ]
+
+
+
+/*Initialization Rules*/
+
+/* This rule indicates $User registered with username ~username and password ~password
+at $Server (either an RP or IdP)
+*/
+//Do not change the following rule, i.e. do not add, change or remove anything (not even comments) in the following nine lines.
+rule Register_User_account:
+    [ Fr(~username), Fr(~password)]
+  --[ Username_belongs_to(~username, $User, $Server), 
+      Only_once($User, $Server)
+    , Is_User($User)
+    , Is_Server($Server)
+    , Register_User_account($User, $Server, ~username, ~password) ]->
+    [ !User_account($User, $Server, ~username, ~password),
+      !PasswordLookUp($Server, ~username, ~password) ]
+
+
+
+/* Protocol Rules */
+
+/*Authentication Request*/
+
+//The user starts a session with a RP
+/* The following rule should be annotated by the following action facts: 
+- User_starts($User, $RP)
+*/
+rule User_starts:
+    []
+    --[ User_starts($User, $RP) ]->
+    [ Out(<$User, 'login'>), User_starts_state($RP, $User) ]
+
+//The RP responds asking for credentials or choosing OIDC
+/* The following rule should be annotated by the following action facts: 
+- RP_responds($User, $RP)
+*/
+rule RP_responds:
+    [ In(<$User, 'login'>) ]
+    --[ RP_responds($User, $RP) ]->
+    [ Out('sendCredentialsOrChooseOIDC'), RP_responds_state($RP, $User) ]
+
+//If user has an account with the RP it directly sends it its credentials..
+/* The following rule should be annotated by the following action facts: 
+- User_Chooses_Direct_Login($User, $RP, ~username, ~password)
+*/
+rule User_Chooses_Direct_Login:
+    [ !User_account($User, $RP, ~username, ~password), In('sendCredentialsOrChooseOIDC'), User_starts_state($RP, $User) ]
+    --[ User_Chooses_Direct_Login($User, $RP, ~username, ~password), User_sends_credentials($User, $RP) ]->
+    [ Out(<'username', ~username, 'password', ~password>) ]
+
+
+//which are checked by the RP, and if successful, logged in.
+/* The following rule should be annotated by the following action facts: 
+- RP_Receives_Credentials($RP, $User, ~username, ~password)
+*/
+rule RP_Receives_Credentials:
+    [ In(<'username', usnm, 'password', passwd>), !PasswordLookUp($RP, ~username, ~password), RP_responds_state($RP, $User) ]
+    --[ RP_Receives_Credentials($RP, $User, ~username, ~password), Eq(usnm, ~username), Eq(passwd, ~password), 
+        RP_accepts_credentials($RP, ~username), RP_Logs_User_in_Direct($RP, $User, ~username) ]->
+    []
+
+
+
+//If the user wants to log-in through an IdP, it indicates this to the RP
+/* This rule should be annotated by the following action facts: 
+- Neq($RP,$IdP) : indicating that the $IdP is not the $RP.
+- Not_an_IdP($RP) : indicating that the $RP is not registered as IdP.
+- User_Chooses_OIDC($User, $RP, $IdP, ~username, ~password)
+*/
+rule User_Chooses_OIDC:
+    [ !User_account($User, $IdP, ~username, ~password), In('sendCredentialsOrChooseOIDC'), User_starts_state($RP, $User) ]
+    --[ Neq($RP,$IdP), Not_an_IdP($RP), User_Chooses_OIDC($User, $RP, $IdP, ~username, ~password) ]->
+    [ Out(<'loginWith', $IdP>), User_Chooses_OIDC_state($User, $IdP, $RP, ~username, ~password) ]
+
+
+//The RP answers with an Authentication Request...
+/* The following rule should be annotated by the following action facts: 
+- AuthRequest_RP($RP, $User, $IdP, ~nonce)
+*/
+//Do not change the following two lines, i.e. do not add, change or remove anything (not even comments) in the following two lines.
+rule AuthRequest_RP:
+    [ In(<'loginWith', $IdP>),
+      Fr(~nonce), !Pk($IdP, pkIdp), RP_responds_state($RP, $User)
+    ]
+    --[ AuthRequest_RP($RP, $User, $IdP, ~nonce) ]->
+    [ Out(<'authRequest', ~nonce>), AuthRequest_RP_state($RP, $User, $IdP, ~nonce, pkIdp) ]
+
+
+//...which is forwarded by the user to the IdP it had indicated
+/* The following rule should be annotated by the following action facts: 
+- AuthRequest_User($User, $RP, $IdP, ~username, ~password, nonce)
+*/
+rule AuthRequest_User:
+    [ In(<'authRequest', nonce>), User_Chooses_OIDC_state($User, $IdP, $RP, ~username, ~password) ]
+    --[ AuthRequest_User($User, $RP, $IdP, ~username, ~password, nonce) ]->
+    [ Out_S($User, $IdP, <'authRequest', $RP, nonce>), AuthRequest_User_state($User, $IdP, $RP, ~username, ~password, nonce) ]
+
+//The IdP gets the Request and asks the user to authenticate.
+/* The following rule should be annotated by the following action facts: 
+- AuthRequest_IdP($IdP, $User, $RP, nonce, ~skey)
+*/
+rule AuthRequest_IdP:
+    [ In_S($User, $IdP, <'authRequest', $RP, nonce>), !Ltk($IdP, ~skey)]
+    --[ AuthRequest_IdP($IdP, $User, $RP, nonce, ~skey) ]->
+    [ Out_S($IdP, $User, <'Auth', 'giveConsent', $RP>), AuthRequest_IdP_state($IdP, $User, $RP, nonce) ]
+
+
+//The user authenticates and gives consent.
+/* This rule should be annotated by the following action facts: 
+- User_Authenticates($User, $RP, $IdP, ~username, ~password, nonce)
+*/
+rule User_Authenticates:
+    [ In_S($IdP, $User, <'Auth', 'giveConsent', $RP>), AuthRequest_User_state($User, $IdP, $RP, ~username, ~password, nonce) ]
+    --[ User_Authenticates($User, $RP, $IdP, ~username, ~password, nonce), User_gives_consent($User, $RP, $IdP) ]->
+    [ Out_S($User, $IdP, <~username, ~password, 'consent', $RP>), User_Authenticates_state($User, $RP, $IdP, ~username, ~password, nonce) ]
+
+
+
+//The IdP receives the user's consent and sends the authentication Resoponse containing the ID Token.
+/* This rule should be annotated by the following action facts: 
+- Authentication_Response_IdP($IdP, $User, $RP, ~username, ~password, nonce)
+*/
+rule Authentication_Response_IdP:
+    let token = <'idToken', <'iss', $IdP>, <'sub', usnm>, <'aud', $RP>, <'nonce', nonce>>
+    signature = sign(token, ~skey)
+    in
+    [ In_S($User, $IdP, <usnm, passwd, 'consent', $RP>), !Ltk($IdP, ~skey), !PasswordLookUp($IdP, ~username, ~password), AuthRequest_IdP_state($IdP, $User, $RP, nonce) ]
+    --[ Authentication_Response_IdP($IdP, $User, $RP, ~username, ~password, nonce), Eq(usnm, ~username), Eq(passwd, ~password) ]->
+    [ Out_S($IdP, $User, <token, signature>), Authentication_Response_IdP_state($IdP, $User, $RP, ~username, ~password, nonce)]
+
+
+//The User forwards the ID Token to the RP (without looking at its content!).
+/* This rule should be annotated by the following action facts: 
+- Authentication_Response_User($User, $RP, $IdP, ~username, ~password, nonce, id_token, signedtoken)
+*/
+rule Authentication_Response_User:
+    [ In_S($IdP, $User, <id_token, signedtoken>), User_Authenticates_state($User, $RP, $IdP, ~username, ~password, nonce) ]
+    --[ Authentication_Response_User($User, $RP, $IdP, ~username, ~password, nonce, id_token, signedtoken) ]->
+    [Out(<id_token, signedtoken>)]
+
+
+//The RP gets the  ID Token and validates it, logging the user in.
+/* This rule should be annotated by the following action facts: 
+- RP_gets_IDToken($RP, $User, $IdP, ~nonce, username, id_token, signedtoken, pk_idp)
+*/
+rule RP_gets_IDToken:
+    let id_token = <'idToken', <'iss', idpToken>, <'sub', username>, <'aud', rpToken>, <'nonce', nonceToken>>
+    in
+    [ In(<id_token, signedtoken>),  AuthRequest_RP_state($RP, $User, $IdP, ~nonce, pk_idp) ]
+    --[ RP_gets_IDToken($RP, $User, $IdP, ~nonce, username, id_token, signedtoken, pk_idp), Eq(~nonce, nonceToken), Eq(verify(signedtoken, id_token, pk_idp), true),
+        Eq($RP, rpToken), Eq($IdP, idpToken), RP_Logs_User_in_OIDC($RP, $User, username, $IdP), 
+        RP_gets_IDToken_for_username($RP, username, $IdP), RP_gets_IDToken_for_user($RP, $User, id_token, $IdP)
+        ]->
+    []
+
+
+
+/*Restrictions*/
+//Equality or Inequality - comment out if not needed:
+restriction Inequality:
+    "All x #i. Neq(x,x) @ #i ==> F"
+
+restriction Equality:
+  "All x y #i. Eq(x,y) @#i ==> x = y"
+
+//Restriction an RP to not be registered as an IdP.
+//Do not change the following restriction, i.e. do not add, change or remove anything (not even comments) in the following two lines.
+restriction RP_shouldnt_be_an_IdP:
+    "All rp #i. Not_an_IdP(rp)@i ==> not(Ex x #j. IdP_initializes(rp, x)@j)"
+
+//Each user should have one account.
+//Do not change the following restriction, i.e. do not add, change or remove anything (not even comments) in the following three lines.
+restriction OneAccount:
+    " All idp u #i #j. (Only_once(u, idp)@i & Only_once(u, idp)@j)
+    ==> (#i = #j )"
+
+
+//Each IdP should only generate a private/public key pair once.
+//Do not change the following restriction, i.e. do not add, change or remove anything (not even comments) in the following three lines.
+restriction IdP_initializes_Once:
+    " All idp v u #i #j. (IdP_initializes(idp, v)@i & IdP_initializes(idp, u)@j)
+    ==> (#i = #j & u = v)"
+
+
+//A user is not a server. i.e. users can not have accounts with users.
+//Do not change the following restriction, i.e. do not add, change or remove anything (not even comments) in the following three lines.
+restriction Users_are_not_Servers:
+  " All user #i. Is_User(user)@i 
+  ==> not (Ex #j. Is_Server(user)@j) "
+
+//Trace existence lemmas
+
+//Do not change this lemma, i.e. do not add, change or remove anything (not even comments) in the following nine lines.
+lemma executableRP:
+ exists-trace
+  "Ex usr rp username password #i #j.
+    ( RP_Receives_Credentials(rp, usr, username, password)@i
+    & User_Chooses_Direct_Login(usr, rp, username, password)@j
+    & #j<#i
+    & not (Ex usr2 rp2 username2 password2 #j2. 
+      User_Chooses_Direct_Login(usr2, rp2, username2, password2)@j2
+      & not (#j = #j2)))"
+
+//Do not change this lemma, i.e. do not add, change or remove anything (not even comments) in the following eleven lines.
+lemma executable_IdP:
+ exists-trace
+  "Ex #i #j #k #m usr username rp idp id_token signedtoken pk_idp password nonce. 
+    (RP_gets_IDToken(rp, usr, idp, nonce, username, id_token, signedtoken, pk_idp)@i
+    & Authentication_Response_IdP(idp, usr, rp, username, password, nonce)@m & #m<#i 
+    & Register_User_account(usr, idp, username, password)@k
+    & User_Chooses_OIDC(usr, rp, idp, username, password)@j & #j<#m ) 
+    & ( not (Ex idp #k. Compromised(idp)@k) )
+    & ( All #n usr2 rp2 idp2 username2 password2. 
+      User_Chooses_OIDC(usr2, rp2, idp2, username2, password2)@n
+        ==> #j = #n )"
+
+
+//Security properties:
+/* To formalize the following security properties, you may only use the following nine action facts:
+        - User_sends_credentials($User, $RP)
+        - User_gives_consent($User, $RP, $IdP)
+        - Username_belongs_to(~username, $User, $Server): (Already part of skeleton)
+        - RP_accepts_credentials($RP, ~username)
+        - RP_Logs_User_in_Direct($RP, $User, ~username)
+        - RP_Logs_User_in_OIDC($RP, $User, username, $IdP)
+        - RP_gets_IDToken_for_username($RP, username, $IdP)
+        - RP_gets_IDToken_for_user($RP, $User, id_token, $IdP) 
+        - Compromised($A): (to be added to rule CompromiseAgent)
+*/
+
+//an RP $RP accepts a username-password pair, only if the user corresponding to that username has earlier sent these credentials to that RP
+//un-comment following line for Task 1.2
+lemma User_gives_Credentials [heuristic=S] :
+    "All rp username #i. RP_accepts_credentials(rp, username)@i ==> 
+    (Ex user #j #t. Username_belongs_to(username, user, rp)@t & User_sends_credentials(user, rp)@j & (#t < #j) & (#j < #i))"
+
+//an RP $RP should receive and accept an ID Token from a non-compromised IdP $IdP for username only if the user corresponding to that username has previously consented to the  $IdP to give $RP such ID Token.
+//un-comment following line for Task 1.2
+lemma User_gives_Consent_to_RP_getting_IDToken [heuristic=S] :
+    "All rp idp username #i. RP_gets_IDToken_for_username(rp, username, idp)@i & (not Ex #k. Compromised(idp)@k) ==>
+    (Ex user #j #t. Username_belongs_to(username, user, idp)@t & User_gives_consent(user, rp, idp)@j & (#t < #j) & (#j < #i))"
+
+
+//An RP $RP logs a user in via Direct Login with a certain username, only if this user is the actual owner of the username for that RP.
+//un-comment following line for Task 1.2
+lemma User_Logged_In_Direct [heuristic=S] :
+    "All rp user username #i. RP_Logs_User_in_Direct(rp, user, username)@i ==> 
+    (Ex #j. Username_belongs_to(username, user, rp)@j & (#j < #i))"
+
+//An RP logs a user in with a username username received in a valid ID Token from a non-compromised $IdP, only if the user is the actual owner of the username username with that IdP.
+//un-comment following line for Task 1.2
+lemma User_Logged_In_OIDC [heuristic=S] :
+    "All rp idp user username #i. RP_Logs_User_in_OIDC(rp, user, username, idp)@i & (not Ex #k. Compromised(idp)@k) ==> 
+    (Ex #j. Username_belongs_to(username, user, idp)@j & (#j < #i))"
+
+// If a RP receives valid credentials (i.e. username and password pair) for user $User, it cannot validate the same credentials from different User $User2.
+//un-comment following line for Task 1.2
+lemma Unique_Credentials [heuristic = S] :
+    "All rp user username #i. RP_Logs_User_in_Direct(rp, user, username)@i ==> 
+    not (Ex user2 #j. RP_Logs_User_in_Direct(rp, user2, username)@j & not(user = user2))"
+
+
+//If a RP receives a valid ID Token from a non-compromised IdP $IdP for user $User, it cannot validate the same ID Token for a different User $User2
+//un-comment following line for Task 1.2
+lemma Unique_IDToken [heuristic = S] :
+    "All rp idp user tokenId #i. RP_gets_IDToken_for_user(rp, user, tokenId, idp)@i & (not Ex #k. Compromised(idp)@k) ==> 
+    not (Ex user2 #j. RP_gets_IDToken_for_user(rp, user2, tokenId, idp)@j & not(user = user2))"
+
+
+end
